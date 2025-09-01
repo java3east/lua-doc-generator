@@ -510,10 +510,24 @@ public class DocGenerator {
             block.hasClassOrFieldTags = true;
         }
 
-        // Don't set expectFunction if we already have class or field tags
-        if (isPlainDocLine(line) && !block.hasClassOrFieldTags && !line.trim().startsWith("---@")) {
+        // Set expectFunction if we have function-related tags (@param, @return, @function) or plain doc lines
+        // Make sure we set expectFunction for any function-related documentation
+        if (isFunctionTag(line) && !block.hasClassOrFieldTags && !line.trim().startsWith("---@type")) {
             block.expectFunction = true;
         }
+
+        // Also set expectFunction for plain doc lines that aren't class/field related
+        if (isPlainDocLine(line) && !block.hasClassOrFieldTags && !line.trim().startsWith("---@type")) {
+            block.expectFunction = true;
+        }
+    }
+
+    private static boolean isFunctionTag(String line) {
+        String trimmed = line.trim();
+        return trimmed.startsWith("---@param") ||
+               trimmed.startsWith("---@return") ||
+               trimmed.startsWith("---@function") ||
+               trimmed.startsWith("---@nodiscard");
     }
 
     private static boolean isClassOrFieldTag(String line) {
@@ -552,6 +566,11 @@ public class DocGenerator {
 
     private static boolean isVariableDeclaration(String line) {
         String trimmedLine = line.trim();
+        // Prüfe zuerst, ob es sich um eine Funktionszuweisung handelt
+        if (trimmedLine.matches(".*=\\s*function\\s*\\(.*")) {
+            return false; // Das ist eine Funktionszuweisung, keine Variable
+        }
+
         // Check for variable declarations including nested table assignments
         return trimmedLine.startsWith("local ") && trimmedLine.contains("=") ||
                (trimmedLine.matches("[\\w\\.]+\\s*=.*") && !trimmedLine.startsWith("function") && !trimmedLine.startsWith("local function"));
@@ -603,9 +622,15 @@ public class DocGenerator {
         Pattern staticPattern = Pattern.compile("(?:local\\s+)?function\\s+(\\w+)\\.(\\w+)\\s*\\(");
         Pattern standalonePattern = Pattern.compile("(?:local\\s+)?function\\s+(\\w+)\\s*\\(");
 
+        // Neue Pattern für verschachtelte Funktionszuweisungen
+        Pattern nestedFunctionAssignmentPattern = Pattern.compile("([\\w\\.]+)\\s*=\\s*function\\s*\\(");
+        Pattern localNestedFunctionAssignmentPattern = Pattern.compile("local\\s+([\\w\\.]+)\\s*=\\s*function\\s*\\(");
+
         Matcher instanceMatcher = instancePattern.matcher(line.trim());
         Matcher staticMatcher = staticPattern.matcher(line.trim());
         Matcher standaloneMatcher = standalonePattern.matcher(line.trim());
+        Matcher nestedMatcher = nestedFunctionAssignmentPattern.matcher(line.trim());
+        Matcher localNestedMatcher = localNestedFunctionAssignmentPattern.matcher(line.trim());
 
         if (instanceMatcher.find()) {
             // Instanz-Methode: ClassName:methodName (kann lokal sein)
@@ -622,12 +647,44 @@ public class DocGenerator {
             block.functionName = standaloneMatcher.group(1);
             block.functionClassName = "";
             block.isStatic = false;
+        } else if (localNestedMatcher.find()) {
+            // Lokale verschachtelte Funktionszuweisung: local Table.subtable.func = function()
+            String fullName = localNestedMatcher.group(1);
+            parseNestedFunctionName(fullName, block);
+        } else if (nestedMatcher.find()) {
+            // Verschachtelte Funktionszuweisung: Table.subtable.func = function()
+            String fullName = nestedMatcher.group(1);
+            parseNestedFunctionName(fullName, block);
+        }
+    }
+
+    /**
+     * Parst verschachtelte Funktionsnamen wie Server.Core.myFunction
+     * @param fullName Der vollständige Name der Funktion (z.B. "Server.Core.myFunction")
+     * @param block Der DocBlock, der aktualisiert werden soll
+     */
+    private static void parseNestedFunctionName(String fullName, DocBlock block) {
+        if (fullName.contains(".")) {
+            // Finde den letzten Punkt, um den Funktionsnamen zu extrahieren
+            int lastDotIndex = fullName.lastIndexOf(".");
+            String className = fullName.substring(0, lastDotIndex);
+            String functionName = fullName.substring(lastDotIndex + 1);
+
+            block.functionClassName = className;
+            block.functionName = functionName;
+            block.isStatic = true; // Verschachtelte Zuweisungen sind normalerweise statisch
+        } else {
+            // Keine Verschachtelung, einfacher Funktionsname
+            block.functionName = fullName;
+            block.functionClassName = "";
+            block.isStatic = false;
         }
     }
 
     private static void validateFunctionDeclaration(String line, int lineNumber) {
         String trimmed = line.trim();
-        if (trimmed.startsWith("function ") || trimmed.startsWith("local function ")) {
+        if (trimmed.startsWith("function ") || trimmed.startsWith("local function ") ||
+            trimmed.matches(".*=\\s*function\\s*\\(.*") || trimmed.matches("local\\s+.*=\\s*function\\s*\\(.*")) {
             return;
         }
         throw new RuntimeException(
